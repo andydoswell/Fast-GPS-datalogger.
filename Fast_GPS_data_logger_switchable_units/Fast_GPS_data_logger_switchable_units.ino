@@ -18,27 +18,27 @@
 
 */
 
-//#include <SPI.h>
+#include <SPI.h>
 #include <Wire.h>
 #include <OzOLED.h>
 #include <TinyGPS++.h>
-#include <EEPROM.h>
+#include <SD.h>
 
-int satVal;                        // Number of satellites locked
-int MPH;                         // Speed in
-                 
+
+int SatVal;                        // Number of satellites locked
+int Speed;                         // Speed in
+char SpeedA [4];                   // Speed as char
 TinyGPSPlus gps;                   // Feed gps data to TinySGPSPlus
+File myFile;                       // Start SD
 int speedDigit;                    // Number of digits in Speedo display
-int milesUnit = 0;
-int milesTen = 3;
-int milesHundred =8;
-int milesThousand =9;
-int milesTenThousand = 9;
-char milesUnitA [2];
-char milesTenA [2];
-char  milesHundredA [2];
-char milesThousandA [2];
-char milesTenThousandA [2];
+boolean card;                      // Is there a card present?
+boolean rec = false;               // Is the record switch low? (false = high)
+int recPin = 9;                    // Record pin (Pull low to record data)
+boolean header = false;            // Has the header been written?
+String filename ;                  // Concaternated filename +.kml
+String filename1 ;                 // Raw GPS Time filename.
+char fileNameChar [14];            // file name as char array
+int unitFlag = 0;                  // Flag used to set the speed units.
 
 void setup()   {
 
@@ -110,43 +110,85 @@ void setup()   {
   delay (100);
   Serial.end();// stop serial coms at 9,600 baud
   delay (100);
-  Serial.begin (56700); // start serial coms at 56,700 baud.
-
+  Serial.begin (56700); // start serial coms at 56,700 baud.         
+  pinMode (recPin, INPUT_PULLUP);  // recPin as input and pulled high
   OzOled.init();                   // initialze SDD1306 OLED display
   OzOled.sendCommand(0x8d);        // Set displays inbuilt inverter on
   OzOled.sendCommand(0x14);
   OzOled.setBrightness(0xFF);      // ... and brightness to max
   OzOled.clearDisplay();           // Clear the screen
   OzOled.setNormalDisplay();       // Set display to Normal mode
+  pinMode(10, OUTPUT);             // CS for SD card, wether it likes it, or not.
+  OzOled.clearDisplay();
+  pinMode (A3, INPUT);             // push button connected between A£ and GND
+  digitalWrite (A3, HIGH);         // Pull A3 high.
+
+  configureUnits ();               // Set the units to use.
+
+  if (!SD.begin(4)) {              //Check SD card is present
+    OzOled.printString("SD card fail    ", 0, 7);
+    card = false;
+  }
+  else {
+    OzOled.printString("SD card OK      ", 0, 7);
+    card = true;
+  }
+
+  OzOled.printString("Sats:", 0, 0); // Set up display
+  OzOled.printString("Speed:", 0, 1);
 }
 
 void loop() {
-//  while (Serial.available() > 0) //While GPS message received
-  //  if (gps.encode(Serial.read())) {
-      updateDisplay();
-      incrementMileage();
-      delay (250);
-     
-   // }
+  while (Serial.available() > 0) //While GPS message received
+    if (gps.encode(Serial.read())) {
+      displayInfo();
+    }
 }
 
-void updateDisplay() {               // Display the data
-  int satVal = int(gps.satellites.value());
-  itoa (milesTenThousand,milesTenThousandA, 10);
-  itoa (milesThousand,milesThousandA, 10);
-  itoa (milesHundred,milesHundredA, 10);
-  itoa (milesTen,milesTenA, 10);
-  itoa (milesUnit,milesUnitA, 10);
-  
-  //OzOled.printNumber ((long)satVal, 0, 0);
-  OzOled.printBigNumber (milesTenThousandA, 0, 0);
-  OzOled.printBigNumber (milesThousandA, 3, 0);
-  OzOled.printBigNumber (milesHundredA, 6, 0);
-  OzOled.printBigNumber (milesTenA, 9, 0);
-  OzOled.printBigNumber (milesUnitA, 12, 0);
-  
+void displayInfo() {               // Display the data
+  SatVal = int(gps.satellites.value());
 
-  //smartDelay(200);
+  if (unitFlag == 3) {
+    unitFlag = 0;
+  }
+  if (unitFlag == 0) {
+    Speed = int(gps.speed.kmph());
+  }
+  if (unitFlag == 1) {
+    Speed = int(gps.speed.knots());
+  }
+  if (unitFlag == 2) {
+    Speed = int(gps.speed.mph());
+  }
+
+  itoa (Speed, SpeedA, 10);
+  OzOled.printNumber ((long)SatVal, 6, 0);
+  OzOled.printBigNumber (SpeedA, 7, 1);
+  speedDigit = strlen(SpeedA);    // get length of Speed , and delete left behind zero if req'd
+  if (speedDigit == 1) {
+    OzOled.printBigNumber(" ", 10, 1);
+  }
+
+  if (digitalRead(recPin) == HIGH && card == true) { //If the record switch is high and the card is OK, write card data, and update display
+    if (header == false) {
+      if (gps.date.year() > 2000 && gps.location.age() < 1500) { // makes sure we have (at some stage since power up) a valid time, and the current fix is valid.{ // if the header hasn't been written, create a new filename with current time HHMMSSCC.kml
+        String filename1(gps.time.value());
+        String filename = filename1 + ".kml";
+        filename.toCharArray(fileNameChar, 13);
+      }
+    }
+    OzOled.printString("SD card OK REC", 0, 7);
+  }
+  if (digitalRead(recPin) == LOW && card == true ) { // if record switch is off, set flag and update display
+    OzOled.printString("SD card OK    ", 0, 7);
+  }
+  if (digitalRead(recPin) == LOW && header == true) { // if record switch is off, but the header flag is set, write the footer.
+    writeFooter();
+  }
+  if (card == true && digitalRead(recPin) == HIGH && (gps.speed.kmph() > 0)) {
+    writeInfo(); //write the data to the SD card
+  }
+  smartDelay(200);
 }
 
 // This custom version of delay() ensures that the gps object
@@ -161,35 +203,61 @@ static void smartDelay(unsigned long ms)
   } while (millis() - start < ms);
 }
 
-void incrementMileage () {
-  milesUnit ++;
-  if (milesUnit == 10) {
-    milesTen++;
-    milesUnit =0;
+void writeInfo() { //Write the data to the SD card fomratted for google earth kml
+
+  myFile = SD.open(fileNameChar, FILE_WRITE);
+  if (header == false) { // If the header hasn't been written, write it.
+    if (myFile) {
+      myFile.print(F("<?xml version=\"1.0\" encoding=\"UTF-8\"?> <kml xmlns=\"http://earth.google.com/kml/2.0\"> <document>"));
+      header = true; // header flag set.
+    }
   }
-  if (milesTen == 10) {
-    milesHundred++;
-    milesTen =0;
+  if (myFile) { // write current GPS position data as KML
+    myFile.println(F("<placemark>"));
+    myFile.print(F("<name>"));
+    myFile.print(Speed, 1);
+    myFile.println(F("</name>"));
+    myFile.print(F("<point><coordinates>"));
+    myFile.print(gps.location.lng(), 6);
+    myFile.print(F(","));
+    myFile.print(gps.location.lat(), 6);
+    myFile.println(F("</coordinates></Point></Placemark>"));
+    myFile.close(); // close the file:
   }
-   if (milesHundred == 10) {
-    milesThousand++;
-    milesHundred =0;
+}
+
+void writeFooter() { // if the record switch is now set to off, write the kml footer, and reset the header flag
+  myFile = SD.open(fileNameChar, FILE_WRITE);
+  header = false;
+  if (myFile) {
+    myFile.println(F("</Document>"));
+    myFile.println (F("</kml>"));
+    myFile.close ();
   }
-   if (milesThousand == 10) {
-    milesTenThousand++;
-    milesThousand =0;
+}
+void configureUnits () {
+  OzOled.printString("Set units       ", 0, 7);
+  for (int i = 0; i < 30000; i++) {
+    if (digitalRead (A3) == LOW) {
+      unitFlag ++;
+    }
+    if (unitFlag == 3) {
+      unitFlag = 0;
+    }
+    if (unitFlag == 0) {
+      Speed = int(gps.speed.kmph());
+      OzOled.printString("KPH", 7, 6);
+    }
+    if (unitFlag == 1) {
+      Speed = int(gps.speed.knots());
+      OzOled.printString("KTS", 7, 6);
+    }
+    if (unitFlag == 2) {
+      Speed = int(gps.speed.mph());
+      OzOled.printString("MPH", 7, 6);
+    }
+    delay (10); // debounce delay
   }
-   if (milesTenThousand == 10) {
-    milesUnit =0;
-    milesTen= 0;
-    milesHundred =0;
-    milesThousand =0;
-    milesTenThousand =0;
-  }
- 
- 
- 
- 
 }
 
 
@@ -214,3 +282,5 @@ void incrementMileage () {
    OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
    THE SOFTWARE.
 */
+
+
